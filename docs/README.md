@@ -4,21 +4,6 @@ Hack Day ramblings to integrate Grafana with Claude Code
 
 ## Server Setup
 
-### Prerequisites
-
-The K8s Debugger uses the official Grafana MCP server, which is a Go binary:
-
-```bash
-# Option 1: Install with Go (recommended)
-GOBIN="$HOME/go/bin" go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
-
-# Option 2: Use Docker
-docker pull mcp/grafana
-
-# Option 3: Use the provided setup script (handles Go/Docker automatically)
-./scripts/setup-grafana-mcp.sh
-```
-
 ### Starting the Server
 
 ```bash
