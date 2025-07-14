@@ -1,0 +1,15 @@
+# Production dependencies
+fastmcp>=0.2.0
+httpx>=0.24.0
+aiohttp>=3.8.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+kubernetes>=27.0.0
+boto3>=1.28.0
+aioboto3>=11.0.0
+prometheus-client>=0.17.0
+python-json-logger>=2.0.0
+tenacity>=8.2.0
+click>=8.0.0
+rich>=13.0.0
+typer>=0.9.0
