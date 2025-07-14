@@ -143,6 +143,23 @@ class MCPServer:
                 return {"error": str(e)}
         
         @self.app.tool()
+        async def get_historical_pod_data(
+            namespace: str,
+            pod_name: str,
+            time_range: str = "7d"
+        ) -> Dict[str, Any]:
+            """Get historical data for terminated pods with enhanced queries."""
+            try:
+                return await self.debug_tools.get_historical_pod_data(
+                    namespace=namespace,
+                    pod_name=pod_name,
+                    time_range=time_range
+                )
+            except Exception as e:
+                logger.error(f"Error getting historical pod data: {e}")
+                return {"error": str(e)}
+        
+        @self.app.tool()
         async def comprehensive_health_check() -> Dict[str, Any]:
             """Perform comprehensive health check of all services."""
             try:
@@ -206,9 +223,11 @@ class MCPServer:
                     },
                     "configuration": {
                         "grafana_url": self.settings.grafana_url,
+                        "grafana_region": self._extract_region_from_url(self.settings.grafana_url),
                         "aws_region": self.settings.aws_region,
                         "aws_profile": self.settings.aws_profile,
                         "eks_cluster": self.settings.eks_cluster_name,
+                        "region_mismatch": self._check_region_mismatch(),
                         "query_timeout": self.settings.query_timeout,
                         "max_concurrent_queries": self.settings.max_concurrent_queries
                     }
@@ -234,6 +253,14 @@ class MCPServer:
         
         await self.app.run()
     
+    def run_sync(self) -> None:
+        """Run the MCP server synchronously."""
+        logger.info("Starting K8s Debugger MCP Server")
+        
+        # FastMCP handles its own event loop, so we call run() directly
+        # The Grafana MCP client connection will be attempted when tools are called
+        self.app.run()
+    
     async def stop(self) -> None:
         """Stop the MCP server."""
         logger.info("Stopping K8s Debugger MCP Server")
@@ -253,3 +280,26 @@ class MCPServer:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         await self.stop()
+    
+    def _extract_region_from_url(self, url: str) -> Optional[str]:
+        """Extract AWS region from Grafana URL."""
+        try:
+            # Extract region from AWS Grafana URLs like: 
+            # https://g-1234567890.grafana-workspace.ap-southeast-2.amazonaws.com
+            if 'amazonaws.com' in url:
+                parts = url.split('.')
+                for part in parts:
+                    if part.startswith('ap-') or part.startswith('us-') or part.startswith('eu-'):
+                        return part
+            return None
+        except:
+            return None
+    
+    def _check_region_mismatch(self) -> bool:
+        """Check if Grafana and AWS regions are different."""
+        grafana_region = self._extract_region_from_url(self.settings.grafana_url)
+        aws_region = self.settings.aws_region
+        
+        if grafana_region and aws_region:
+            return grafana_region != aws_region
+        return False

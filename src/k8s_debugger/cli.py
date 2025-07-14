@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Coroutine, Any
 
 import typer
 from rich.console import Console
@@ -17,6 +17,21 @@ from .utils.logging import setup_logging
 
 app = typer.Typer(help="Kubernetes Debugger with Grafana MCP integration")
 console = Console()
+
+
+def run_async(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run async coroutine, handling existing event loops gracefully."""
+    try:
+        # Check if there's already a running loop
+        loop = asyncio.get_running_loop()
+        # If we get here, there's already a loop running
+        console.print("[yellow]Warning: Running in an existing event loop context.[/yellow]")
+        console.print("[yellow]This command cannot be run from within an async environment.[/yellow]")
+        console.print("[yellow]Please run from a regular Python environment or terminal.[/yellow]")
+        raise typer.Exit(1)
+    except RuntimeError:
+        # No loop is running, safe to use asyncio.run
+        return asyncio.run(coro)
 
 
 @app.command("server")
@@ -46,12 +61,10 @@ def start_server(
     
     setup_logging(settings)
     
-    async def run_server():
-        server = MCPServer(settings)
-        await server.start()
-    
-    console.print(f"[green]Starting K8s Debugger MCP Server on {settings.server_host}:{settings.server_port}[/green]")
-    asyncio.run(run_server())
+    # Create and run the server directly (FastMCP handles its own event loop)
+    # Note: No console output when running as MCP server (STDIO protocol)
+    server = MCPServer(settings)
+    server.run_sync()
 
 
 @app.command("debug")
@@ -78,7 +91,7 @@ def debug_pod(
                 show_events=events
             )
     
-    asyncio.run(run_debug())
+    run_async(run_debug())
 
 
 @app.command("analyze")
@@ -97,7 +110,7 @@ def analyze_namespace(
                 time_range=time_range
             )
     
-    asyncio.run(run_analysis())
+    run_async(run_analysis())
 
 
 @app.command("labels")
@@ -118,7 +131,7 @@ def debug_by_labels(
                 time_range=time_range
             )
     
-    asyncio.run(run_debug())
+    run_async(run_debug())
 
 
 @app.command("history")
@@ -144,7 +157,7 @@ def get_historical_data(
             else:
                 console.print("[green]Historical data retrieved successfully[/green]")
     
-    asyncio.run(run_history())
+    run_async(run_history())
 
 
 @app.command("health")
@@ -162,7 +175,7 @@ def check_health(
                 console.print("[red]✗ MCP server is not responding[/red]")
                 raise typer.Exit(1)
     
-    asyncio.run(run_health_check())
+    run_async(run_health_check())
 
 
 @app.command("config")

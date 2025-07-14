@@ -86,7 +86,9 @@ class DebugTools:
         
         # Build Loki query
         if pod_name:
-            query = f'{{namespace="{namespace}", pod="{pod_name}"}}'
+            # For terminated pods, try both exact match and regex pattern
+            # Terminated pods may have different naming patterns or suffixes
+            query = f'{{namespace="{namespace}"}} |~ ".*{pod_name}.*"'
         elif label_selector:
             # Convert k8s label selector to Loki query
             labels = [f'{k}="{v}"' for k, v in 
@@ -123,7 +125,8 @@ class DebugTools:
         
         # Build Prometheus queries
         if pod_name:
-            pod_filter = f'pod="{pod_name}"'
+            # For terminated pods, use regex matching for more flexible pod name matching
+            pod_filter = f'namespace="{namespace}", pod=~".*{pod_name}.*"'
         elif label_selector:
             # This would need more sophisticated label matching
             pod_filter = f'namespace="{namespace}"'
@@ -199,6 +202,128 @@ class DebugTools:
             logger.error(f"Error getting cluster events: {e}")
             return {"error": str(e)}
     
+    async def get_historical_pod_data(
+        self,
+        namespace: str,
+        pod_name: str,
+        time_range: str = "7d"
+    ) -> Dict[str, Any]:
+        """Get historical data for terminated pods with enhanced queries."""
+        start_time, end_time = self._time_range_to_timestamps(time_range)
+        
+        # Try multiple query strategies for terminated pods
+        strategies = [
+            # Strategy 1: Exact pod name match
+            {
+                "loki_query": f'{{namespace="{namespace}", pod="{pod_name}"}}',
+                "prometheus_filter": f'namespace="{namespace}", pod="{pod_name}"'
+            },
+            # Strategy 2: Regex pattern matching (for generated pod names)
+            {
+                "loki_query": f'{{namespace="{namespace}"}} |~ ".*{pod_name}.*"',
+                "prometheus_filter": f'namespace="{namespace}", pod=~".*{pod_name}.*"'
+            },
+            # Strategy 3: Base name matching (remove suffixes like -1234567890)
+            {
+                "loki_query": f'{{namespace="{namespace}"}} |~ ".*{pod_name.split("-")[0]}.*"',
+                "prometheus_filter": f'namespace="{namespace}", pod=~".*{pod_name.split("-")[0]}.*"'
+            }
+        ]
+        
+        best_result = None
+        for i, strategy in enumerate(strategies):
+            logger.info(f"Trying strategy {i+1} for terminated pod {pod_name}")
+            
+            try:
+                # Test with logs first (usually more reliable for terminated pods)
+                loki_result = await self.grafana_mcp_client.query_loki(
+                    query=strategy["loki_query"],
+                    start_time=start_time,
+                    end_time=end_time,
+                    limit=100
+                )
+                
+                # If we get results, use this strategy
+                if loki_result.get("data", {}).get("result", []):
+                    logger.info(f"Strategy {i+1} found data for terminated pod")
+                    best_result = strategy
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Strategy {i+1} failed: {e}")
+                continue
+        
+        if not best_result:
+            return {
+                "error": f"No historical data found for terminated pod {pod_name} in namespace {namespace}",
+                "searched_time_range": time_range,
+                "strategies_tried": len(strategies)
+            }
+        
+        # Get comprehensive data using the successful strategy
+        tasks = [
+            self._query_historical_logs(namespace, best_result["loki_query"], start_time, end_time),
+            self._query_historical_metrics(namespace, best_result["prometheus_filter"], start_time, end_time)
+        ]
+        
+        logs_result, metrics_result = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        return {
+            "historical_data": {
+                "namespace": namespace,
+                "pod_name": pod_name,
+                "time_range": time_range,
+                "strategy_used": best_result,
+                "data_found": True
+            },
+            "logs": logs_result if not isinstance(logs_result, Exception) else {"error": str(logs_result)},
+            "metrics": metrics_result if not isinstance(metrics_result, Exception) else {"error": str(metrics_result)},
+            "summary": "Historical data retrieved for terminated pod"
+        }
+    
+    async def _query_historical_logs(self, namespace: str, query: str, start_time: str, end_time: str) -> Dict[str, Any]:
+        """Query historical logs with enhanced error handling."""
+        try:
+            result = await self.grafana_mcp_client.query_loki(
+                query=query,
+                start_time=start_time,
+                end_time=end_time,
+                limit=1000  # Higher limit for historical queries
+            )
+            return {
+                "logs": result.get("data", {}).get("result", []),
+                "query": query,
+                "time_range": {"start": start_time, "end": end_time}
+            }
+        except Exception as e:
+            logger.error(f"Error querying historical logs: {e}")
+            return {"error": str(e)}
+    
+    async def _query_historical_metrics(self, namespace: str, pod_filter: str, start_time: str, end_time: str) -> Dict[str, Any]:
+        """Query historical metrics with enhanced error handling."""
+        queries = {
+            "cpu_usage": f'rate(container_cpu_usage_seconds_total{{{pod_filter}}}[5m])',
+            "memory_usage": f'container_memory_working_set_bytes{{{pod_filter}}}',
+            "network_rx": f'rate(container_network_receive_bytes_total{{{pod_filter}}}[5m])',
+            "network_tx": f'rate(container_network_transmit_bytes_total{{{pod_filter}}}[5m])'
+        }
+        
+        results = {}
+        for metric_name, query in queries.items():
+            try:
+                result = await self.grafana_mcp_client.query_prometheus(
+                    query=query,
+                    start_time=start_time,
+                    end_time=end_time,
+                    step="1m"  # Better resolution for historical data
+                )
+                results[metric_name] = result.get("data", {}).get("result", [])
+            except Exception as e:
+                logger.error(f"Error querying historical {metric_name}: {e}")
+                results[metric_name] = {"error": str(e)}
+        
+        return results
+
     async def correlate_pod_data(
         self,
         namespace: str,
@@ -207,6 +332,14 @@ class DebugTools:
         time_range: str = "1h"
     ) -> Dict[str, Any]:
         """Correlate logs, metrics, and events for comprehensive pod debugging."""
+        
+        # If time_range is more than 24h or explicitly looking for historical data,
+        # use enhanced historical query for terminated pods
+        if pod_name and (time_range.endswith('d') or 'day' in time_range.lower()):
+            logger.info(f"Using historical pod data query for {pod_name} with time range {time_range}")
+            return await self.get_historical_pod_data(namespace, pod_name, time_range)
+        
+        # Standard real-time pod debugging
         # Run all queries concurrently
         tasks = [
             self.get_pod_logs(namespace, pod_name, label_selector, time_range),
