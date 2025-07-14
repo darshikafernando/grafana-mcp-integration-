@@ -1,6 +1,6 @@
 # K8s Debugger Usage Examples
 
-The K8s Debugger provides a comprehensive toolkit for Kubernetes post-mortem analysis and debugging using Grafana's observability stack.
+Hack Day ramblings to integrate Grafana with Claude Code
 
 ## Server Setup
 
